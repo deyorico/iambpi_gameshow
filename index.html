@@ -32,8 +32,10 @@ button:disabled{opacity:.5}
 .score{font-family:'Archivo Black',Impact,sans-serif;font-size:26px}
 .pill{padding:4px 12px;border-radius:99px;font-weight:700;font-size:14px}
 .pill.open{background:var(--go);color:#06382a}.pill.closed{background:var(--stop);color:#fff}
-.board .item{padding:18px 20px}.board .rank,.board .score{font-size:34px}.board .nm{font-size:28px;font-weight:700}
+.board .item{padding:12px 18px}.board .rank,.board .score{font-size:34px}.board .nm{font-size:28px;font-weight:700}
 .sm{padding:8px 12px;font-size:15px}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:32px;align-items:start}
+@media (max-width:760px){.split{grid-template-columns:1fr}}
 .av{border-radius:50%;object-fit:cover;border:4px solid;display:grid;place-items:center;font-family:'Archivo Black',Impact,sans-serif;color:#1b1233;flex:none;overflow:hidden}
 .sw{display:flex;flex-wrap:wrap;gap:12px}
 .sw button{width:48px;height:48px;border-radius:50%;padding:0;border:4px solid transparent}
@@ -207,9 +209,16 @@ function renderHost(){
 
 /* ---------- Board (projector) ---------- */
 function renderBoard(){
-  app.style.maxWidth = '900px';
-  app.innerHTML = `<div class="stack board"><h1 style="font-size:44px">Leaderboard</h1>
-    ${ranked().map((p,i) => `<div class="item"><span class="rank">${i+1}</span>${av(p,64)}<span class="grow nm">${esc(p.name)}</span><span class="score">${p.score}</span></div>`).join('') || '<p class="dim">Waiting for players...</p>'}</div>`;
+  app.style.maxWidth = '1400px';
+  const open = state.status === 'open';
+  const first = buzzes[0] ? new Date(buzzes[0].created_at).getTime() : 0;
+  app.innerHTML = `<div class="split">
+    <div class="stack board"><h1 style="font-size:40px">Leaderboard</h1>
+      ${ranked().map((p,i) => `<div class="item"><span class="rank">${i+1}</span>${av(p,56)}<span class="grow nm">${esc(p.name)}</span><span class="score">${p.score}</span></div>`).join('') || '<p class="dim">Waiting for players...</p>'}</div>
+    <div class="stack board"><div class="row"><h1 class="grow" style="font-size:40px">${state.round ? 'Round ' + state.round : 'Buzz order'}</h1>
+      <span class="pill ${state.status}">${open ? 'Buzzer open' : 'Buzzer closed'}</span></div>
+      ${buzzes.length ? buzzes.map((b,i) => `<div class="item"><span class="rank">${i+1}</span>${av(pl(b.player_id),56)}<span class="grow nm">${esc(nameOf(b.player_id))}</span><span class="dim">${i ? '+' + ((new Date(b.created_at).getTime()-first)/1000).toFixed(3) + 's' : 'FIRST'}</span></div>`).join('')
+        : `<p class="dim" style="font-size:22px">${open ? 'Buzzer is open... waiting for the first buzz!' : 'Waiting for the next round.'}</p>`}</div></div>`;
 }
 
 refresh();
