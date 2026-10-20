@@ -34,6 +34,17 @@ button:disabled{opacity:.5}
 .pill.open{background:var(--go);color:#06382a}.pill.closed{background:var(--stop);color:#fff}
 .board .item{padding:12px 18px}.board .rank,.board .score{font-size:34px}.board .nm{font-size:28px;font-weight:700}
 .sm{padding:8px 12px;font-size:15px}
+.bp{padding:20px;border-radius:22px;border:3px solid}
+.bp.open{background:#0d3b33;border-color:var(--go)}
+.bp.closed{background:#3a1430;border-color:#7a2f5c}
+.bp .item{background:rgba(255,255,255,.09)}
+.bp .item.b1{background:linear-gradient(90deg,#ffc83d,#ffe28f);color:#2a1d00}
+.bp .item.b2{background:#d9dde8;color:#1b1233}
+.bp .item.b3{background:#e0a070;color:#2a1200}
+.bp .item.b1 .rank,.bp .item.b2 .rank,.bp .item.b3 .rank,.bp .item.b1 .dim,.bp .item.b2 .dim,.bp .item.b3 .dim{color:inherit}
+.bp .item.b1 .nm{font-size:34px}
+.snd,#snd{position:fixed;right:14px;bottom:calc(14px + env(safe-area-inset-bottom));z-index:5;padding:10px 16px;font-size:15px;background:var(--panel);color:var(--ink);border:2px solid var(--line);border-radius:99px}
+#snd.on{border-color:var(--go)}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:32px;align-items:start}
 @media (max-width:760px){.split{grid-template-columns:1fr}}
 .av{border-radius:50%;object-fit:cover;border:4px solid;display:grid;place-items:center;font-family:'Archivo Black',Impact,sans-serif;color:#1b1233;flex:none;overflow:hidden}
@@ -58,9 +69,36 @@ const q = new URLSearchParams(location.search);
 const mode = q.has('host') ? 'host' : q.has('board') ? 'board' : 'play';
 const app = document.getElementById('app');
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let players = [], state = {round:0, status:'closed'}, buzzes = [], me = null, hostOK = false, step = 10;
+let lastSig = null, players = [], state = {round:0, status:'closed'}, buzzes = [], me = null, hostOK = false, step = 10;
 
 try { me = localStorage.getItem('playerId'); } catch(e){}
+
+/* ---------- Sound (host + board) ---------- */
+let actx = null, soundOn = false, firstLoad = true; const seen = new Set();
+function unlock(){
+  if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+  if (actx.state === 'suspended') actx.resume();
+}
+function tone(freq, t0, dur, type, vol){
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(vol, t0 + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t0); o.stop(t0 + dur + 0.02);
+}
+function playBuzz(rank){
+  if (!soundOn || !actx) return;
+  const t = actx.currentTime;
+  if (rank === 0) { tone(880, t, 0.18, 'square', 0.2); tone(1318, t + 0.12, 0.4, 'square', 0.2); } // first: two-note chime
+  else tone(Math.max(330, 660 - rank * 40), t, 0.22, 'triangle', 0.35);                          // others: blip
+}
+if (mode !== 'play') {
+  const sb2 = document.createElement('button');
+  sb2.id = 'snd'; sb2.textContent = 'Tap to enable sound';
+  sb2.onclick = () => { unlock(); soundOn = !soundOn; sb2.textContent = soundOn ? 'Sound on (tap to mute)' : 'Sound off (tap to enable)'; sb2.classList.toggle('on', soundOn); if (soundOn) playBuzz(1); };
+  document.body.appendChild(sb2);
+}
 
 async function refresh(){
   const [p, s] = await Promise.all([
@@ -71,8 +109,15 @@ async function refresh(){
   if (s.data) state = s.data;
   const b = await sb.from('buzzes').select('*').eq('round', state.round).order('created_at');
   if (b.data) buzzes = b.data;
+  if (mode !== 'play') {
+    const fresh = buzzes.filter(x => !seen.has(x.id));
+    fresh.forEach(x => seen.add(x.id));
+    if (!firstLoad) fresh.forEach((x, k) => setTimeout(() => playBuzz(buzzes.indexOf(x)), k * 180));
+    firstLoad = false;
+  }
   if (me && !players.find(x => x.id === me)) { me = null; try{localStorage.removeItem('playerId')}catch(e){} }
-  render();
+  const sig = JSON.stringify([players, state, buzzes, me]);
+  if (sig !== lastSig) { lastSig = sig; render(); }
 }
 let t; const soon = () => { clearTimeout(t); t = setTimeout(refresh, 60); };
 ['players','game_state','buzzes'].forEach(tb => sb.channel('c-'+tb).on('postgres_changes',{event:'*',schema:'public',table:tb},soon).subscribe());
@@ -153,7 +198,7 @@ function renderPlay(){
     btn.className = 'buzzer done'; btn.textContent = '...'; btn.disabled = true;
     if (navigator.vibrate) navigator.vibrate(60);
     await sb.rpc('buzz', {p_player: me});
-    refresh();
+    lastSig = null; refresh();
   };
 }
 
@@ -166,7 +211,13 @@ function renderPin(){
   };
 }
 
-async function setState(patch){ await sb.from('game_state').update(patch).eq('id',1); refresh(); }
+async function setState(patch){
+  state = {...state, ...patch}; if (patch.round) buzzes = []; lastSig = null; render();
+  let {data, error} = await sb.from('game_state').update(patch).eq('id',1).select();
+  if (!error && (!data || !data.length)) ({error} = await sb.from('game_state').upsert({id:1, ...patch}));
+  if (error) alert('Could not update the game: ' + error.message);
+  lastSig = null; refresh();
+}
 async function addScore(id, d){
   const p = players.find(x => x.id === id);
   p.score += d; render();
@@ -215,9 +266,9 @@ function renderBoard(){
   app.innerHTML = `<div class="split">
     <div class="stack board"><h1 style="font-size:40px">Leaderboard</h1>
       ${ranked().map((p,i) => `<div class="item"><span class="rank">${i+1}</span>${av(p,56)}<span class="grow nm">${esc(p.name)}</span><span class="score">${p.score}</span></div>`).join('') || '<p class="dim">Waiting for players...</p>'}</div>
-    <div class="stack board"><div class="row"><h1 class="grow" style="font-size:40px">${state.round ? 'Round ' + state.round : 'Buzz order'}</h1>
+    <div class="stack board bp ${state.status}"><div class="row"><h1 class="grow" style="font-size:40px">${state.round ? 'Round ' + state.round : 'Buzz order'}</h1>
       <span class="pill ${state.status}">${open ? 'Buzzer open' : 'Buzzer closed'}</span></div>
-      ${buzzes.length ? buzzes.map((b,i) => `<div class="item"><span class="rank">${i+1}</span>${av(pl(b.player_id),56)}<span class="grow nm">${esc(nameOf(b.player_id))}</span><span class="dim">${i ? '+' + ((new Date(b.created_at).getTime()-first)/1000).toFixed(3) + 's' : 'FIRST'}</span></div>`).join('')
+      ${buzzes.length ? buzzes.map((b,i) => `<div class="item${i<3?' b'+(i+1):''}"><span class="rank">${i+1}</span>${av(pl(b.player_id),56)}<span class="grow nm">${esc(nameOf(b.player_id))}</span><span class="dim">${i ? '+' + ((new Date(b.created_at).getTime()-first)/1000).toFixed(3) + 's' : 'FIRST'}</span></div>`).join('')
         : `<p class="dim" style="font-size:22px">${open ? 'Buzzer is open... waiting for the first buzz!' : 'Waiting for the next round.'}</p>`}</div></div>`;
 }
 
