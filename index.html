@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Game Show Buzzer</title>
-<link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Barlow:wght@500;700&display=swap" rel="stylesheet">
 <style>
@@ -72,17 +71,13 @@ window.addEventListener('unhandledrejection', ev => showErr('Error: ' + (ev.reas
 <script>
 const CFG_URL = typeof SUPABASE_URL !== 'undefined' ? SUPABASE_URL : '';
 const CFG_KEY = typeof SUPABASE_ANON_KEY !== 'undefined' ? SUPABASE_ANON_KEY : '';
-const PIN = typeof HOST_PIN !== 'undefined' ? String(HOST_PIN) : '';
+const PIN = typeof HOST_PIN !== 'undefined' ? HOST_PIN : '1234';
 let CONFIG_MSG = '';
 if (!CFG_URL || !CFG_KEY) CONFIG_MSG = 'config.js was not found. Upload config.js to GitHub next to index.html, then reload.';
 else if (CFG_URL.includes('YOUR-PROJECT') || CFG_KEY.includes('YOUR-ANON-KEY')) CONFIG_MSG = 'Setup needed: open config.js and paste in your Supabase URL and anon key.';
 else if (typeof supabase === 'undefined') CONFIG_MSG = 'Could not load the Supabase library. Check your internet connection and reload.';
-let sb = null;
-if (!CONFIG_MSG) {
-  try { sb = supabase.createClient(CFG_URL, CFG_KEY); }
-  catch (error) { CONFIG_MSG = 'Supabase setup error: ' + error.message; }
-}
 const CONFIG_BAD = !!CONFIG_MSG;
+const sb = CONFIG_BAD ? null : supabase.createClient(CFG_URL, CFG_KEY);
 const q = new URLSearchParams(location.search);
 const mode = q.has('host') ? 'host' : q.has('board') ? 'board' : 'play';
 const app = document.getElementById('app');
@@ -118,55 +113,31 @@ if (mode !== 'play') {
   document.body.appendChild(sb2);
 }
 
-let refreshing = false, refreshTimer, pollTimer;
-let connected = false;
-function connectionScreen(message){
-  app.innerHTML = `<div class="stack" style="text-align:center;padding-top:40px">
-    <h2>Game Show Buzzer</h2><p class="dim">${esc(message)}</p>
-    <button id="retry">Retry connection</button></div>`;
-  document.getElementById('retry').onclick = refresh;
-}
 async function refresh(){
-  if (CONFIG_BAD) { connectionScreen(CONFIG_MSG); showErr(CONFIG_MSG); return; }
-  if (refreshing) return;
-  refreshing = true;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
-  try {
-    const [p, s] = await Promise.all([
-      sb.from('players').select('*').order('created_at').abortSignal(controller.signal),
-      sb.from('game_state').select('*').eq('id',1).single().abortSignal(controller.signal)
-    ]);
-    if (controller.signal.aborted) throw new Error('Database connection timed out.');
-    if (p.error || s.error) throw new Error((p.error || s.error).message);
-    if (!s.data) throw new Error('Missing game_state record with id 1.');
-    const b = await sb.from('buzzes').select('*').eq('round', s.data.round).order('created_at').abortSignal(controller.signal);
-    if (controller.signal.aborted) throw new Error('Database connection timed out.');
-    if (b.error) throw new Error(b.error.message);
-    players = p.data || []; state = s.data; buzzes = b.data || [];
-    if (mode !== 'play') {
-      const fresh = buzzes.filter(x => !seen.has(x.id));
-      fresh.forEach(x => seen.add(x.id));
-      if (!firstLoad) fresh.forEach((x, k) => setTimeout(() => playBuzz(buzzes.indexOf(x)), k * 180));
-      firstLoad = false;
-    }
-    if (me && !players.find(x => x.id === me)) { me = null; try { localStorage.removeItem('playerId'); } catch(e) {} }
-    const sig = JSON.stringify([players, state, buzzes, me]);
-    const wasConnected = connected;
-    connected = true;
-    const e = document.getElementById('err'); if (e) e.remove();
-    if (!wasConnected || sig !== lastSig) { render(); lastSig = sig; }
-  } catch (error) {
-    connected = false; lastSig = null;
-    const msg = controller.signal.aborted ? 'Database connection timed out. Check your internet and Supabase project.' : 'Database error: ' + error.message;
-    showErr(msg);
-    connectionScreen(msg);
-  } finally {
-    clearTimeout(timeout);
-    refreshing = false;
+  if (CONFIG_BAD) { showErr(CONFIG_MSG); document.getElementById('app').innerHTML = '<p class="dim" style="text-align:center;padding-top:40px">' + esc(CONFIG_MSG) + '</p>'; return; }
+  const [p, s] = await Promise.all([
+    sb.from('players').select('*').order('created_at'),
+    sb.from('game_state').select('*').eq('id',1).single()
+  ]);
+  if (p.error || s.error) showErr('Database error: ' + (p.error || s.error).message + ' (re-run supabase.sql and check config.js)');
+  else { const e = document.getElementById('err'); if (e) e.remove(); }
+  if (p.data) players = p.data;
+  if (s.data) state = s.data;
+  const b = await sb.from('buzzes').select('*').eq('round', state.round).order('created_at');
+  if (b.data) buzzes = b.data;
+  if (mode !== 'play') {
+    const fresh = buzzes.filter(x => !seen.has(x.id));
+    fresh.forEach(x => seen.add(x.id));
+    if (!firstLoad) fresh.forEach((x, k) => setTimeout(() => playBuzz(buzzes.indexOf(x)), k * 180));
+    firstLoad = false;
   }
+  if (me && !players.find(x => x.id === me)) { me = null; try{localStorage.removeItem('playerId')}catch(e){} }
+  const sig = JSON.stringify([players, state, buzzes, me]);
+  if (sig !== lastSig) { lastSig = sig; render(); }
 }
-const soon = () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 60); };
+let t; const soon = () => { clearTimeout(t); t = setTimeout(refresh, 60); };
+['players','game_state','buzzes'].forEach(tb => sb && sb.channel('c-'+tb).on('postgres_changes',{event:'*',schema:'public',table:tb},soon).subscribe());
+setInterval(refresh, 4000); // safety net if realtime drops
 
 const COLORS = ['#ff4f6d','#ff9f43','#ffc83d','#2ee6a6','#36d1dc','#4f8cff','#a066ff','#ff6fd8','#c4ff4f','#ffffff'];
 function av(p, size=44){
@@ -252,7 +223,7 @@ function renderPin(){
   app.innerHTML = `<div class="stack"><h1 style="font-size:30px">Host login</h1>
     <input id="pin" type="password" inputmode="numeric" placeholder="Host PIN"><button id="ok">Enter</button></div>`;
   document.getElementById('ok').onclick = () => {
-    if (PIN && document.getElementById('pin').value === PIN) { hostOK = true; render(); } else alert('Wrong PIN');
+    if (document.getElementById('pin').value === PIN) { hostOK = true; render(); } else alert('Wrong PIN');
   };
 }
 
@@ -317,22 +288,7 @@ function renderBoard(){
         : `<p class="dim" style="font-size:22px">${open ? 'Buzzer is open... waiting for the first buzz!' : 'Waiting for the next round.'}</p>`}</div></div>`;
 }
 
-// Start only after all UI variables and functions have been initialized.
-if (CONFIG_BAD) {
-  connectionScreen(CONFIG_MSG);
-  showErr(CONFIG_MSG);
-} else {
-  connectionScreen('Connecting to the game database...');
-  refresh();
-  pollTimer = setInterval(refresh, 4000);
-  try {
-    ['players','game_state','buzzes'].forEach(tb =>
-      sb.channel('c-'+tb).on('postgres_changes', {event:'*',schema:'public',table:tb}, soon).subscribe()
-    );
-  } catch (error) {
-    console.warn('Realtime unavailable; polling will continue.', error);
-  }
-}
+refresh();
 </script>
 </body>
 </html>
